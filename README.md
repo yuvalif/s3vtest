@@ -4,6 +4,103 @@ Command-line tool to test S3 Vectors functionality, performance and
 reliability against Ceph RGW (or AWS). Written in Rust on top of the official
 `aws-sdk-s3vectors` crate.
 
+## Run from a container
+
+No Rust toolchain and no clone of this repository are needed. The image
+contains the tool built with HDF5 support, and the example configurations
+under `/usr/share/s3vtest/examples`.
+
+```sh
+podman pull ghcr.io/yuvalif/s3vtest:latest
+```
+
+### Quick start: a bundled example
+
+The connection settings are passed in the environment, using the same
+variable names as the AWS CLI, so nothing has to be mounted:
+
+```sh
+export AWS_ENDPOINT_URL=http://localhost:8000
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+
+podman run --rm --network host \
+  -e AWS_ENDPOINT_URL -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
+  ghcr.io/yuvalif/s3vtest run /usr/share/s3vtest/examples/rgw-vstart.yaml
+```
+
+### Your own configuration, from standard input
+
+`-` reads the configuration from standard input. Note the `-i`:
+
+```sh
+podman run --rm ghcr.io/yuvalif/s3vtest example > job.yaml    # then edit job.yaml
+podman run --rm -i --network host \
+  -e AWS_ENDPOINT_URL -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
+  ghcr.io/yuvalif/s3vtest run - < job.yaml
+```
+
+The job is named `stdin` in the report. Only one configuration can come from
+standard input per invocation.
+
+### Datasets: keep the download in a named volume
+
+A downloaded dataset is lost when the container exits unless its directory
+outlives it. A named volume avoids downloading it again on every run:
+
+```sh
+podman run --rm --network host \
+  -e AWS_ENDPOINT_URL -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
+  -v s3vtest-datasets:/work/datasets \
+  ghcr.io/yuvalif/s3vtest run /usr/share/s3vtest/examples/sift-128-euclidean.yaml
+```
+
+This works because the examples use `datasets_dir: datasets`, which is
+relative to the working directory of the container, `/work`.
+
+### Optional: mount a directory
+
+Useful when you keep several job files, run more than one job at a time, or
+want to use dataset files that are already on the host:
+
+```sh
+podman run --rm --network host -v "$PWD":/work:Z \
+  -e AWS_ENDPOINT_URL -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
+  ghcr.io/yuvalif/s3vtest run a.yaml b.yaml --report json
+```
+
+`:Z` relabels the directory for SELinux.
+
+### Notes
+
+- `--network host` lets the tool reach an RGW that listens on the host, such
+  as `http://localhost:8000`. It is not needed for a remote endpoint.
+- Reports go to stdout and logs to stderr, so `> report.json 2> run.log`
+  works as usual. The exit status of the tool is the exit status of
+  `podman run`.
+- To build the image locally: `podman build -t s3vtest .`
+
+## Connection settings
+
+The `connection` section of the configuration can be overridden, or left out
+entirely, by command line flags or environment variables. The order of
+precedence is flag, then environment, then file.
+
+| Setting | Flag | Environment variable |
+| --- | --- | --- |
+| `connection.endpoint` | `--endpoint` | `AWS_ENDPOINT_URL` |
+| `connection.access_key` | `--access-key` | `AWS_ACCESS_KEY_ID` |
+| `connection.secret_key` | `--secret-key` | `AWS_SECRET_ACCESS_KEY` |
+| `connection.region` | `--region` | `AWS_REGION`, then `AWS_DEFAULT_REGION` |
+
+These are the variables the AWS CLI and SDKs use, so a shell that is already
+set up for `aws --endpoint-url ...` against the same RGW works unchanged.
+Only these are read: profiles, `~/.aws/credentials`, `AWS_SESSION_TOKEN` and
+the service-specific `AWS_ENDPOINT_URL_<SERVICE>` variables are not.
+
+They apply to `run`, `validate` and `cleanup`, and to every job of the
+invocation.
+
 ## Build
 
 ```sh
@@ -22,6 +119,7 @@ s3vtest example > job.yaml        # print a commented example configuration
 s3vtest datasets                  # list the downloadable datasets
 s3vtest validate job.yaml         # parse and validate only
 s3vtest run job.yaml              # run one job, print a table report
+s3vtest run - < job.yaml          # the same, reading the configuration from stdin
 s3vtest run a.yaml b.yaml --report json   # several jobs concurrently, JSON report
 s3vtest cleanup job.yaml          # delete leftovers under the job's bucket prefix
 RUST_LOG=s3vtest=debug s3vtest run job.yaml   # more logging (stderr)

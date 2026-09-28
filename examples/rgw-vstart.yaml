@@ -1,4 +1,8 @@
 # s3vtest configuration
+# The connection values can also be given on the command line (--endpoint, --access-key,
+# --secret-key, --region) or in the environment, using the same variables as the AWS CLI
+# (AWS_ENDPOINT_URL, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION or
+# AWS_DEFAULT_REGION); those take precedence over this file.
 connection:
   endpoint: http://localhost:8000
   access_key: 0555b35654ad1656d804

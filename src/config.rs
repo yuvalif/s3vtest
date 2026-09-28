@@ -24,6 +24,9 @@ pub mod limits {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// May be omitted, or partial, when the values are given on the command
+    /// line or through the AWS_* environment variables.
+    #[serde(default)]
     pub connection: Connection,
     #[serde(with = "serde_yaml_ng::with::singleton_map_recursive")]
     pub entities: Entities,
@@ -36,8 +39,11 @@ pub struct Config {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Connection {
+    #[serde(default)]
     pub endpoint: String,
+    #[serde(default)]
     pub access_key: String,
+    #[serde(default)]
     pub secret_key: String,
     #[serde(default = "default_region")]
     pub region: String,
@@ -51,6 +57,30 @@ pub struct Connection {
     /// Use path-style addressing for the backing S3 bucket operations.
     #[serde(default = "default_true")]
     pub force_path_style: bool,
+}
+
+impl Default for Connection {
+    fn default() -> Self {
+        Self {
+            endpoint: String::new(),
+            access_key: String::new(),
+            secret_key: String::new(),
+            region: default_region(),
+            retries: 0,
+            timeout_secs: None,
+            force_path_style: true,
+        }
+    }
+}
+
+/// Connection settings given outside the configuration file. They take
+/// precedence over the file.
+#[derive(Debug, Clone, Default)]
+pub struct ConnectionOverrides {
+    pub endpoint: Option<String>,
+    pub access_key: Option<String>,
+    pub secret_key: Option<String>,
+    pub region: Option<String>,
 }
 
 fn default_region() -> String {
@@ -435,19 +465,77 @@ impl Default for Execution {
 }
 
 impl Config {
-    pub fn load(path: &Path) -> Result<Config> {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading config file {}", path.display()))?;
-        let cfg: Config = serde_yaml_ng::from_str(&text)
+    /// Load and validate a configuration. The path `-` reads standard input.
+    pub fn load(path: &Path, overrides: &ConnectionOverrides) -> Result<Config> {
+        let text = if path == Path::new("-") {
+            let mut t = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut t)
+                .context("reading the configuration from standard input")?;
+            t
+        } else {
+            std::fs::read_to_string(path)
+                .with_context(|| format!("reading config file {}", path.display()))?
+        };
+        let mut cfg: Config = serde_yaml_ng::from_str(&text)
             .with_context(|| format!("parsing config file {}", path.display()))?;
+        cfg.apply(overrides);
         cfg.validate()
             .with_context(|| format!("invalid config file {}", path.display()))?;
         Ok(cfg)
     }
 
+    pub fn apply(&mut self, o: &ConnectionOverrides) {
+        let c = &mut self.connection;
+        if let Some(v) = &o.endpoint {
+            c.endpoint = v.clone();
+        }
+        if let Some(v) = &o.access_key {
+            c.access_key = v.clone();
+        }
+        if let Some(v) = &o.secret_key {
+            c.secret_key = v.clone();
+        }
+        if let Some(v) = &o.region {
+            c.region = v.clone();
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
         let mut errors: Vec<String> = Vec::new();
         let e = &self.entities;
+
+        for (name, value, flag, var) in [
+            (
+                "endpoint",
+                &self.connection.endpoint,
+                "--endpoint",
+                "AWS_ENDPOINT_URL",
+            ),
+            (
+                "access_key",
+                &self.connection.access_key,
+                "--access-key",
+                "AWS_ACCESS_KEY_ID",
+            ),
+            (
+                "secret_key",
+                &self.connection.secret_key,
+                "--secret-key",
+                "AWS_SECRET_ACCESS_KEY",
+            ),
+        ] {
+            if value.is_empty() {
+                errors.push(format!(
+                    "connection.{name} is not set; set it in the file, with {flag}, or with {var}"
+                ));
+            }
+        }
+        if !self.connection.endpoint.is_empty()
+            && !(self.connection.endpoint.starts_with("http://")
+                || self.connection.endpoint.starts_with("https://"))
+        {
+            errors.push("connection.endpoint must start with http:// or https://".into());
+        }
 
         check_num(
             &mut errors,
@@ -761,6 +849,10 @@ fn check_name_prefix(errors: &mut Vec<String>, path: &str, prefix: &str) {
 
 /// An example configuration, printed by `s3vtest example`.
 pub const EXAMPLE_YAML: &str = r#"# s3vtest configuration
+# The connection values can also be given on the command line (--endpoint, --access-key,
+# --secret-key, --region) or in the environment, using the same variables as the AWS CLI
+# (AWS_ENDPOINT_URL, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION or
+# AWS_DEFAULT_REGION); those take precedence over this file.
 connection:
   endpoint: http://localhost:8000
   access_key: 0555b35654ad1656d804
@@ -888,6 +980,35 @@ mod tests {
         cfg.entities.vectors.source = VectorSourceSpec::Dataset("sift-128-euclidean".into());
         cfg.entities.index.metric = Metric::Euclidean;
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn connection_overrides() {
+        let yaml = EXAMPLE_YAML;
+        let start = yaml.find("connection:").unwrap();
+        let end = yaml.find("entities:").unwrap();
+        let without = format!("{}{}", &yaml[..start], &yaml[end..]);
+        let mut cfg: Config = serde_yaml_ng::from_str(&without).unwrap();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("AWS_ENDPOINT_URL") && err.contains("AWS_SECRET_ACCESS_KEY"));
+        cfg.apply(&ConnectionOverrides {
+            endpoint: Some("http://host:9000".into()),
+            access_key: Some("a".into()),
+            secret_key: Some("b".into()),
+            region: None,
+        });
+        cfg.validate().unwrap();
+        assert_eq!(cfg.connection.endpoint, "http://host:9000");
+        assert_eq!(cfg.connection.region, "us-east-1");
+
+        // overrides win over the file
+        let mut cfg: Config = serde_yaml_ng::from_str(EXAMPLE_YAML).unwrap();
+        cfg.apply(&ConnectionOverrides {
+            endpoint: Some("https://other".into()),
+            ..Default::default()
+        });
+        assert_eq!(cfg.connection.endpoint, "https://other");
+        assert!(!cfg.connection.access_key.is_empty());
     }
 
     #[test]

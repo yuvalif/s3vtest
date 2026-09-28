@@ -24,13 +24,65 @@ struct Cli {
     cmd: Cmd,
 }
 
+/// Connection settings that override the configuration file.
+#[derive(clap::Args, Clone, Debug)]
+struct ConnArgs {
+    /// S3 endpoint, overrides `connection.endpoint`.
+    #[arg(long, env = "AWS_ENDPOINT_URL")]
+    endpoint: Option<String>,
+    /// Access key, overrides `connection.access_key`.
+    #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
+    access_key: Option<String>,
+    /// Secret key, overrides `connection.secret_key`. Prefer the environment
+    /// variable, which does not show up in the process list.
+    #[arg(long, env = "AWS_SECRET_ACCESS_KEY", hide_env_values = true)]
+    secret_key: Option<String>,
+    /// Region, overrides `connection.region`. AWS_DEFAULT_REGION is used
+    /// when AWS_REGION is not set.
+    #[arg(long, env = "AWS_REGION")]
+    region: Option<String>,
+}
+
+impl ConnArgs {
+    fn overrides(&self) -> config::ConnectionOverrides {
+        let non_empty = |v: &Option<String>| v.clone().filter(|s| !s.is_empty());
+        config::ConnectionOverrides {
+            endpoint: non_empty(&self.endpoint),
+            access_key: non_empty(&self.access_key),
+            secret_key: non_empty(&self.secret_key),
+            region: non_empty(&self.region)
+                .or_else(|| non_empty(&std::env::var("AWS_DEFAULT_REGION").ok())),
+        }
+    }
+}
+
+/// A job is named after its file; standard input is named "stdin".
+fn job_name(p: &std::path::Path) -> String {
+    if p == std::path::Path::new("-") {
+        return "stdin".to_string();
+    }
+    p.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("job")
+        .to_string()
+}
+
+fn check_single_stdin(configs: &[PathBuf]) -> Result<()> {
+    if configs.iter().filter(|p| p.as_os_str() == "-").count() > 1 {
+        anyhow::bail!("standard input ('-') can be given only once");
+    }
+    Ok(())
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// Run one job per configuration file; jobs run concurrently.
     Run {
-        /// YAML configuration files.
+        /// YAML configuration files. `-` reads one from standard input.
         #[arg(required = true)]
         configs: Vec<PathBuf>,
+        #[command(flatten)]
+        conn: ConnArgs,
         /// Report format.
         #[arg(long, value_enum, default_value_t = ReportFormat::Table)]
         report: ReportFormat,
@@ -46,8 +98,11 @@ enum Cmd {
     },
     /// Parse and validate configuration files without running them.
     Validate {
+        /// YAML configuration files. `-` reads one from standard input.
         #[arg(required = true)]
         configs: Vec<PathBuf>,
+        #[command(flatten)]
+        conn: ConnArgs,
     },
     /// Print an example configuration file.
     Example,
@@ -55,7 +110,12 @@ enum Cmd {
     Datasets,
     /// Delete every vector bucket (and backing bucket) whose name starts with
     /// the configured prefix, along with its indexes.
-    Cleanup { config: PathBuf },
+    Cleanup {
+        /// YAML configuration file. `-` reads it from standard input.
+        config: PathBuf,
+        #[command(flatten)]
+        conn: ConnArgs,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -98,28 +158,31 @@ fn main() -> Result<()> {
             println!("\nAll are HDF5 files and need a build with `--features hdf5`.");
             Ok(())
         }
-        Cmd::Validate { configs } => {
+        Cmd::Validate { configs, conn } => {
+            check_single_stdin(&configs)?;
             for p in &configs {
-                config::Config::load(p)?;
+                config::Config::load(p, &conn.overrides())?;
                 println!("{}: ok", p.display());
             }
             Ok(())
         }
-        Cmd::Cleanup { config } => {
-            let cfg = config::Config::load(&config)?;
+        Cmd::Cleanup { config, conn } => {
+            let cfg = config::Config::load(&config, &conn.overrides())?;
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(flow::cleanup(&cfg))
         }
         Cmd::Run {
             configs,
+            conn,
             report,
             seed,
             threads,
             repeat,
         } => {
+            check_single_stdin(&configs)?;
             let mut jobs = Vec::new();
             for p in &configs {
-                let mut cfg = config::Config::load(p)?;
+                let mut cfg = config::Config::load(p, &conn.overrides())?;
                 if let Some(s) = seed {
                     cfg.execution.seed = Some(s);
                 }
@@ -129,12 +192,7 @@ fn main() -> Result<()> {
                 if let Some(r) = repeat {
                     cfg.execution.repeat = r;
                 }
-                let name = p
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("job")
-                    .to_string();
-                jobs.push((name, cfg));
+                jobs.push((job_name(p), cfg));
             }
             let total_threads: usize = jobs.iter().map(|(_, c)| c.execution.threads).sum();
             let rt = tokio::runtime::Builder::new_multi_thread()
@@ -168,5 +226,34 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn region_falls_back_to_aws_default_region() {
+        let args = |region: Option<&str>| ConnArgs {
+            endpoint: None,
+            access_key: None,
+            secret_key: None,
+            region: region.map(str::to_string),
+        };
+        std::env::set_var("AWS_DEFAULT_REGION", "from-default");
+        assert_eq!(
+            args(None).overrides().region.as_deref(),
+            Some("from-default")
+        );
+        // the flag, or AWS_REGION which clap maps onto it, wins
+        assert_eq!(
+            args(Some("explicit")).overrides().region.as_deref(),
+            Some("explicit")
+        );
+        std::env::remove_var("AWS_DEFAULT_REGION");
+        assert_eq!(args(None).overrides().region, None);
+        assert_eq!(job_name(std::path::Path::new("-")), "stdin");
+        assert_eq!(job_name(std::path::Path::new("/a/b/job1.yaml")), "job1");
     }
 }
