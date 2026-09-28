@@ -1,0 +1,48 @@
+[package]
+name = "s3vtest"
+version = "0.1.0"
+edition = "2021"
+description = "Functional, performance and reliability test tool for the S3 Vectors API (AWS and Ceph RGW)"
+license = "MIT"
+
+[dependencies]
+aws-sdk-s3vectors = "1"
+aws-sdk-s3 = "1"
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-credential-types = { version = "1", features = ["hardcoded-credentials"] }
+aws-smithy-runtime-api = { version = "1", features = ["client"] }
+aws-smithy-types = "1"
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml_ng = "0.10"
+serde_json = "1"
+rand = "0.9"
+rand_distr = "0.5"
+rand_chacha = "0.9"
+hdrhistogram = "7"
+comfy-table = "8"
+anyhow = "1"
+thiserror = "2"
+futures = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+ndarray = "0.16"
+ndarray-npy = "0.9"
+bytes = "1"
+flate2 = "1"
+tar = "0.4"
+sha2 = "0.10"
+hex = "0.4"
+hdf5 = { package = "hdf5-metno", version = "0.10", optional = true }
+
+[features]
+default = []
+# Read .hdf5 datasets, linking against the system libhdf5 (needs hdf5-devel).
+hdf5 = ["dep:hdf5"]
+# Same, but builds HDF5 from source with cmake; no system package needed.
+hdf5-static = ["hdf5", "hdf5/static", "hdf5/zlib"]
+
+[profile.release]
+debug = 1

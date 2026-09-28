@@ -1,0 +1,55 @@
+# s3vtest job using the SIFT1M dataset from ann-benchmarks
+# (http://ann-benchmarks.com/sift-128-euclidean.hdf5, 1,000,000 vectors of 128 dimensions).
+#
+# Requires a build with the hdf5 feature:  cargo build --release --features hdf5
+# The file (about 500 MB) is downloaded once into execution.datasets_dir and reused.
+
+connection:
+  endpoint: http://localhost:9000
+  access_key: 0555b35654ad1656d804
+  secret_key: h7GhxuBLTrlhVUyxSPUKUV8r/2EI4ngqJxD7iBdBYLhwluN30JaT3Q==
+  region: default
+  retries: 0
+
+entities:
+  vector_buckets:
+    count: 1
+    prefix: s3vt-sift-
+    create_backing_bucket: true
+  indexes_per_bucket:
+    count: 1
+    prefix: idx-
+  index:
+    # dimension is omitted: it is taken from the dataset (128)
+    metric: euclidean            # must match the dataset; validation rejects cosine here
+    filterable_keys:
+      - {name: category, type: Number}
+  vectors_per_index: 100000      # rows are taken in order from the 1,000,000 in the file
+  insert_batch_size: 250         # keep PutVectors bodies under RGW's rgw_max_put_param_size (1 MiB)
+  key_prefix: sift-
+  vectors:
+    source:
+      dataset: sift-128-euclidean
+    metadata:
+      - {name: category, value: {range: [0, 99]}}
+      - {name: source,   value: {const: sift1m}}
+
+flow:
+  - create_vector_bucket
+  - create_index
+  - insert_vectors
+  # source: test uses the 10,000 held-out query vectors of the file (the default when
+  # a test set exists); train queries with inserted rows, random with any row
+  - query_vectors: {count: 1000, top_k: 10, source: test, return_distance: true}
+  - query_vectors: {count: 1000, top_k: 10, source: test, filter: {category: {$lt: 50}}}
+  - query_vectors: {count: 1000, top_k: 10, source: train, return_distance: true}
+  - get_vectors: {percent: 1, batch_size: 100}
+  - list_vectors: {batch_size: 500}
+  - delete_index
+  - delete_vector_bucket
+
+execution:
+  threads: 16
+  repeat: 1
+  seed: 42
+  datasets_dir: datasets

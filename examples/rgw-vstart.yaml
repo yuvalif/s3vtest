@@ -1,0 +1,65 @@
+# s3vtest configuration
+connection:
+  endpoint: http://localhost:8000
+  access_key: 0555b35654ad1656d804
+  secret_key: h7GhxuBLTrlhVUyxSPUKUV8r/2EI4ngqJxD7iBdBYLhwluN30JaT3Q==
+  region: default
+  retries: 0            # SDK retries per call; 0 makes every failure visible
+  # timeout_secs: 30    # per-attempt timeout
+
+entities:
+  vector_buckets:
+    count: 1                     # constant, or {min: 1, max: 4}
+    prefix: s3vt-
+    create_backing_bucket: true  # RGW needs a regular S3 bucket with the same name
+  indexes_per_bucket:
+    count: {min: 1, max: 2}
+    prefix: idx-
+  index:
+    dimension: 128               # required for a random source; taken from the dataset otherwise
+    metric: cosine               # cosine | euclidean; must match the dataset (-angular => cosine)
+    filterable_keys:             # RGW extension (typed, pre-filtered columns)
+      - {name: year, type: Number, must_exist: true}
+      - {name: genre}            # type defaults to String
+    non_filterable_keys: [blob]
+  vectors_per_index: 2000
+  insert_batch_size: {min: 100, max: 300}   # RGW rejects bodies over rgw_max_put_param_size (1 MiB) with 405
+  key_prefix: vec-
+  vectors:
+    source:
+      random:
+        centroids: 8                 # cluster centers, drawn once from the seed
+        centroid_range: [-1.0, 1.0]  # uniform range of each centroid component
+        mean: 0.0                    # per-component Gaussian noise around the centroid;
+        stddev: 0.1                  # stddev relative to centroid_range sets cluster overlap
+        normalize: true              # unit length, for cosine indexes
+      # dataset: sift-128-euclidean      # downloaded into execution.datasets_dir (needs the hdf5 feature);
+      #                                  # see `s3vtest datasets` for the list
+      # file: /data/sift_base.fvecs      # .fvecs, .npy or .hdf5
+    metadata:
+      - {name: year,  value: {range: [1950, 2025]}}
+      - {name: genre, value: {choice: [rock, pop, jazz]}, probability: 0.9}
+      - {name: tag,   value: {random_string: 16}}
+      - {name: blob,  value: {random_string: 256}, probability: 0.5}
+      - {name: src,   value: {const: s3vtest}}
+
+flow:
+  - create_vector_bucket
+  - create_index
+  - insert_vectors
+  - get_vectors: {percent: 10, batch_size: 100, return_data: true, return_metadata: true}
+  - list_vectors: {batch_size: 500, return_data: false, return_metadata: false}
+  # source: auto (default) | test | train | random; auto = the dataset's test set when it
+  # has one, else train (inserted rows); with a random vector source it is a fresh vector
+  - query_vectors: {count: 50, top_k: 10, source: auto, return_distance: true}
+  - update_vectors: {percent: 5}
+  - delete_vectors: {percent: 20, batch_size: 500}
+  - delete_index
+  - delete_vector_bucket
+
+execution:
+  threads: 8
+  repeat: 1
+  seed: 42
+  datasets_dir: datasets
+  max_logged_errors: 10
