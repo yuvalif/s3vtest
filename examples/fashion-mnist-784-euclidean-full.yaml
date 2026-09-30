@@ -1,0 +1,51 @@
+# Load the complete Fashion-MNIST dataset (60,000 vectors of 784 dimensions) into
+# one index and leave it there. This is the quickest of the bundled datasets for an
+# end-to-end check of the recall command: the load is about 670 PutVectors calls,
+# the listing 120 pages, and the exact search a few seconds. No update or delete steps.
+#
+#   s3vtest run    examples/fashion-mnist-784-euclidean-full.yaml
+#   s3vtest recall examples/fashion-mnist-784-euclidean-full.yaml --queries 1000 --top-k 10
+#   s3vtest recall examples/fashion-mnist-784-euclidean-full.yaml --no-list --queries 5000 --top-k 100   # skips the listing
+#   s3vtest cleanup examples/fashion-mnist-784-euclidean-full.yaml      # when done
+#
+# Requires a build with the hdf5 feature (the container image has it). The 220 MB
+# dataset file is downloaded once into execution.datasets_dir and reused.
+
+connection:
+  endpoint: http://localhost:8000
+  access_key: 0555b35654ad1656d804
+  secret_key: h7GhxuBLTrlhVUyxSPUKUV8r/2EI4ngqJxD7iBdBYLhwluN30JaT3Q==
+  region: default
+  retries: 0
+
+entities:
+  vector_buckets:
+    count: 1
+    prefix: s3vt-fmnist-full-
+    create_backing_bucket: true
+  indexes_per_bucket:
+    count: 1
+    prefix: idx-
+  index:
+    # dimension is taken from the dataset (784)
+    metric: euclidean            # the metric the dataset was built for
+  vectors_per_index: 60000       # the whole train set
+  insert_batch_size: 90          # 784 floats per vector: ~11 KB each, keeps the body under RGW's 1 MiB limit
+  key_prefix: fmnist-
+  vectors:
+    source:
+      dataset: fashion-mnist-784-euclidean
+    # no metadata: the index holds exactly the dataset, nothing else
+
+flow:
+  - create_vector_bucket
+  - create_index
+  - insert_vectors
+  # a first look at query latency; correctness is measured by the recall command
+  - query_vectors: {count: 1000, top_k: 10, source: test, return_distance: true}
+
+execution:
+  threads: 16
+  repeat: 1
+  seed: 42
+  datasets_dir: datasets

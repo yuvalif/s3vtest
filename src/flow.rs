@@ -24,16 +24,16 @@ use crate::sample::{derive_rng, SeededRng};
 use crate::vectors::{self, VectorSource};
 
 /// The fixed set of entities a job works on, decided once from the seed.
-struct Plan {
-    buckets: Vec<String>,
+pub(crate) struct Plan {
+    pub(crate) buckets: Vec<String>,
     /// Every index of every bucket, flattened.
-    indexes: Vec<IndexPlan>,
+    pub(crate) indexes: Vec<IndexPlan>,
 }
 
-struct IndexPlan {
-    bucket: String,
-    name: String,
-    num_vectors: u64,
+pub(crate) struct IndexPlan {
+    pub(crate) bucket: String,
+    pub(crate) name: String,
+    pub(crate) num_vectors: u64,
 }
 
 /// Mutable per-index state, updated between steps only.
@@ -160,7 +160,7 @@ pub async fn run_job(name: String, cfg: Config) -> Result<JobReport> {
     })
 }
 
-fn make_plan(cfg: &Config, rng: &mut SeededRng) -> Plan {
+pub(crate) fn make_plan(cfg: &Config, rng: &mut SeededRng) -> Plan {
     let e = &cfg.entities;
     let nb = e.vector_buckets.count.sample(rng);
     let mut buckets = Vec::new();

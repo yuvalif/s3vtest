@@ -13,6 +13,10 @@ use crate::sample::SeededRng;
 
 pub trait VectorSource: Send + Sync {
     fn dimension(&self) -> usize;
+    /// Number of dataset rows, when the source is a dataset.
+    fn train_len(&self) -> Option<u64> {
+        None
+    }
     /// Number of held-out query vectors, when the dataset has a test set.
     fn test_len(&self) -> Option<u64> {
         None
@@ -22,8 +26,7 @@ pub trait VectorSource: Send + Sync {
         None
     }
     /// Row indexes of the true nearest neighbours of test vector `i`, when
-    /// the dataset ships ground truth. Reserved for the correctness mode.
-    #[allow(dead_code)]
+    /// the dataset ships ground truth. Used by `recall --no-list`.
     fn neighbors(&self, _i: u64) -> Option<&[i32]> {
         None
     }
@@ -114,6 +117,9 @@ struct Loaded {
 impl VectorSource for DatasetSource {
     fn dimension(&self) -> usize {
         self.dim
+    }
+    fn train_len(&self) -> Option<u64> {
+        Some((self.data.len() / self.dim) as u64)
     }
     fn test_len(&self) -> Option<u64> {
         (!self.test.is_empty()).then(|| (self.test.len() / self.dim) as u64)

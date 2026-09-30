@@ -35,6 +35,7 @@ flate2 = "1"
 tar = "0.4"
 sha2 = "0.10"
 hex = "0.4"
+rayon = "1"
 hdf5 = { package = "hdf5-metno", version = "0.10", optional = true }
 
 [features]

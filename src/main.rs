@@ -4,6 +4,7 @@ mod ext;
 mod flow;
 mod metadata;
 mod metrics;
+mod recall;
 mod report;
 mod sample;
 mod vectors;
@@ -108,6 +109,46 @@ enum Cmd {
     Example,
     /// List the datasets that `entities.vectors.source.dataset` accepts.
     Datasets,
+    /// Measure query correctness: list the vectors each index holds, run
+    /// queries, and compare the results with an exact nearest-neighbour
+    /// search computed locally. Run it after a flow that inserted vectors
+    /// and before one that deletes them.
+    Recall {
+        /// YAML configuration file. `-` reads it from standard input.
+        config: PathBuf,
+        #[command(flatten)]
+        conn: ConnArgs,
+        /// Queries per index.
+        #[arg(long, default_value_t = 1000)]
+        queries: u64,
+        /// Results per query (topK).
+        #[arg(long, default_value_t = 10)]
+        top_k: u32,
+        /// Where the query vectors come from: auto, test, train or random.
+        #[arg(long, value_enum, default_value_t = SourceArg::Auto)]
+        source: SourceArg,
+        /// Relative tolerance on the k-th distance for counting ties as correct.
+        #[arg(long, default_value_t = 1e-3)]
+        epsilon: f64,
+        /// Fail (exit 2) when the mean recall of any index is below this.
+        #[arg(long)]
+        min_recall: Option<f64>,
+        /// Concurrent queries. Defaults to `execution.threads`.
+        #[arg(long)]
+        threads: Option<usize>,
+        /// ListVectors page size used to read the indexes back.
+        #[arg(long, default_value_t = 500)]
+        page_size: i32,
+        /// Do not list the indexes; use the ground truth shipped with the
+        /// dataset instead. You guarantee that each index holds the complete
+        /// dataset and nothing else. Needs a dataset with ground truth and
+        /// the `test` query source; top-k is limited to the neighbours the
+        /// file provides (100 for the ann-benchmarks datasets).
+        #[arg(long)]
+        no_list: bool,
+        #[arg(long, value_enum, default_value_t = ReportFormat::Table)]
+        report: ReportFormat,
+    },
     /// Delete every vector bucket (and backing bucket) whose name starts with
     /// the configured prefix, along with its indexes.
     Cleanup {
@@ -116,6 +157,25 @@ enum Cmd {
         #[command(flatten)]
         conn: ConnArgs,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum SourceArg {
+    Auto,
+    Test,
+    Train,
+    Random,
+}
+
+impl From<SourceArg> for config::QuerySource {
+    fn from(s: SourceArg) -> Self {
+        match s {
+            SourceArg::Auto => config::QuerySource::Auto,
+            SourceArg::Test => config::QuerySource::Test,
+            SourceArg::Train => config::QuerySource::Train,
+            SourceArg::Random => config::QuerySource::Random,
+        }
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -163,6 +223,61 @@ fn main() -> Result<()> {
             for p in &configs {
                 config::Config::load(p, &conn.overrides())?;
                 println!("{}: ok", p.display());
+            }
+            Ok(())
+        }
+        Cmd::Recall {
+            config,
+            conn,
+            queries,
+            top_k,
+            source,
+            epsilon,
+            min_recall,
+            threads,
+            page_size,
+            no_list,
+            report,
+        } => {
+            let cfg = config::Config::load(&config, &conn.overrides())?;
+            if top_k == 0 || top_k > config::limits::MAX_TOP_K {
+                anyhow::bail!(
+                    "--top-k must be between 1 and {}",
+                    config::limits::MAX_TOP_K
+                );
+            }
+            if !(1..=config::limits::MAX_LIST_PAGE as i32).contains(&page_size) {
+                anyhow::bail!(
+                    "--page-size must be between 1 and {}",
+                    config::limits::MAX_LIST_PAGE
+                );
+            }
+            let opts = recall::RecallOpts {
+                queries,
+                top_k,
+                source: source.into(),
+                epsilon,
+                threads: threads.unwrap_or(cfg.execution.threads),
+                page_size,
+                no_list,
+            };
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(opts.threads.clamp(1, 256))
+                .enable_all()
+                .build()
+                .context("building tokio runtime")?;
+            let results = rt.block_on(recall::recall(&cfg, &opts))?;
+            match report {
+                ReportFormat::Table => print!("{}", recall::table(&results)),
+                ReportFormat::Json => println!("{}", serde_json::to_string_pretty(&results)?),
+            }
+            let failed = results.iter().any(|r| {
+                r.query_errors > 0
+                    || r.unknown_keys > 0
+                    || min_recall.is_some_and(|m| r.recall_mean < m)
+            });
+            if failed {
+                std::process::exit(2);
             }
             Ok(())
         }

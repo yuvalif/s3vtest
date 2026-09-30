@@ -121,6 +121,7 @@ s3vtest validate job.yaml         # parse and validate only
 s3vtest run job.yaml              # run one job, print a table report
 s3vtest run - < job.yaml          # the same, reading the configuration from stdin
 s3vtest run a.yaml b.yaml --report json   # several jobs concurrently, JSON report
+s3vtest recall job.yaml           # measure query correctness against an exact local search
 s3vtest cleanup job.yaml          # delete leftovers under the job's bucket prefix
 RUST_LOG=s3vtest=debug s3vtest run job.yaml   # more logging (stderr)
 ```
@@ -130,9 +131,14 @@ Exit status is 2 when any step recorded errors.
 ## Configuration
 
 One YAML file per job. See `s3vtest example` for every field with comments.
-Ready-made jobs are in `examples/`: `rgw-vstart.yaml` (random vectors against a
-vstart RGW) and `sift-128-euclidean.yaml` (the SIFT1M dataset, needs the
-`hdf5` feature).
+Ready-made jobs are in `examples/`:
+
+- `rgw-vstart.yaml`: random vectors against a vstart RGW, every step.
+- `sift-128-euclidean.yaml`: 100,000 SIFT1M vectors with metadata, filtered
+  and unfiltered queries, then cleanup (needs the `hdf5` feature).
+- `fashion-mnist-784-euclidean-full.yaml`: the whole Fashion-MNIST dataset,
+  60,000 vectors, loaded and left in place for the `recall` command; the
+  quickest full dataset to load and check (needs the `hdf5` feature).
 
 - `connection`: endpoint, credentials, region, SDK retries (default 0 so every
   failure is counted) and per-attempt timeout.
@@ -223,6 +229,85 @@ operations per second, p50/p90/p99/max latency in milliseconds, and for the
 vector steps the upload and download throughput measured from request and
 response body sizes. Latency is measured around the SDK call, so it includes
 signing and connection handling on the client.
+
+## Query correctness: the `recall` command
+
+`s3vtest recall job.yaml` measures how correct the server's query results
+are. For every index of the job it:
+
+1. lists the vectors the index holds, with their data;
+2. runs `--queries` queries (default 1000) with `--top-k` results each;
+3. computes the exact `k` nearest neighbours of every query locally, in
+   parallel, over the listed vectors;
+4. reports the recall: the fraction of returned keys that are true
+   neighbours, averaged over the queries.
+
+Because the ground truth comes from what the index actually holds, it is
+right for any vector source, for a subset of a dataset, and after updates and
+deletes. Run it after a flow that inserted vectors and before one that deletes
+them, for example:
+
+```sh
+s3vtest run job.yaml            # flow: create_vector_bucket, create_index, insert_vectors
+s3vtest recall job.yaml --queries 1000 --top-k 10 --min-recall 0.95
+s3vtest cleanup job.yaml
+```
+
+`examples/fashion-mnist-784-euclidean-full.yaml` is such a job: it loads the
+complete 60,000-vector Fashion-MNIST dataset into one index and has no
+update or delete steps.
+
+The same job file and seed are used, so the command finds the same buckets
+and indexes the flow created.
+
+| Column | Meaning |
+| --- | --- |
+| recall mean, min, p10 | over the queries; p10 is the 10th percentile |
+| perfect % | queries whose recall is exactly 1 |
+| truth | `listed`: exact search over the listed vectors; `file`: the dataset's ground truth (`--no-list`) |
+| unknown keys | returned keys the listing (or, with `--no-list`, the dataset) does not contain, always a bug |
+| query errors | failed queries, excluded from the recall figures |
+| dist max rel err | largest relative difference between a returned distance and the recomputed one |
+
+Options: `--source` picks the query vectors as for the `query_vectors` step
+(`auto`, `test`, `train`, `random`); `--epsilon` (default 0.001) counts a
+result as correct when its true distance is within that relative tolerance of
+the k-th true distance, so ties do not count as misses; `--min-recall` makes
+the command exit with status 2 when the mean recall of any index is below it;
+`--report json` prints the figures as JSON. Unknown keys and query errors
+always give exit status 2.
+
+### `--no-list`: use the ground truth shipped with the dataset
+
+The ann-benchmarks files carry the true 100 nearest train rows of every test
+vector. With `--no-list` the command skips the listing and scores the
+returned keys against that, mapping each key back to its dataset row through
+`key_prefix`. This saves the listing and the exact search, which are most of
+the run time on a large index, but it is only right when **each index holds
+the complete dataset and nothing else**: no partial load, no extra vectors,
+no deletes, no updates. The command checks what it can (a dataset with
+ground truth, `--source test`, `vectors_per_index` equal to the dataset size,
+`--top-k` at most 100) and trusts you for the rest. Returned distances are
+still checked against the train vectors held in memory.
+
+```sh
+s3vtest run    examples/fashion-mnist-784-euclidean-full.yaml
+s3vtest recall examples/fashion-mnist-784-euclidean-full.yaml --no-list --queries 5000 --top-k 100
+```
+
+The `truth` column of the report says `file` or `listed`.
+
+How to read the numbers:
+
+- A recall below 1 is not automatically a bug. An approximate index trades
+  some recall for speed, and the RGW may build such an index in the
+  background, so the figure can change over time for the same data. Use
+  `--min-recall` as a quality threshold.
+- For a euclidean index the command also compares the returned distances
+  with squared euclidean distances and says so when those match instead.
+- Listing a large index takes a while (one round trip per page of
+  `--page-size` vectors, 500 by default), and the exact search costs about a
+  minute per 1000 queries over a million 128-dimensional vectors.
 
 ## RGW notes
 
