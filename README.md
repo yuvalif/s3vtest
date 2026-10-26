@@ -101,6 +101,29 @@ the service-specific `AWS_ENDPOINT_URL_<SERVICE>` variables are not.
 They apply to `run`, `validate` and `cleanup`, and to every job of the
 invocation.
 
+### Several endpoints
+
+`connection.endpoint` can be a list instead of a single URL, for instance
+several RGW instances of the same cluster. Requests are then sent to the
+endpoints in round-robin order, one request at a time, all with the same
+credentials, region, retry and timeout settings:
+
+```yaml
+connection:
+  endpoint: [http://rgw1:8000, http://rgw2:8000]
+```
+
+On the command line and in `AWS_ENDPOINT_URL` the list is comma-separated:
+
+```sh
+s3vtest run job.yaml --endpoint http://rgw1:8000,http://rgw2:8000
+AWS_ENDPOINT_URL=http://rgw1:8000,http://rgw2:8000 s3vtest run job.yaml
+```
+
+Every operation counts as one request, including each page of a listing and
+each batch of an insert, so with `execution.threads` in-flight requests the
+load is spread evenly. Errors are reported per step, not per endpoint.
+
 ## Build
 
 ```sh
@@ -140,8 +163,9 @@ Ready-made jobs are in `examples/`:
   60,000 vectors, loaded and left in place for the `recall` command; the
   quickest full dataset to load and check (needs the `hdf5` feature).
 
-- `connection`: endpoint, credentials, region, SDK retries (default 0 so every
-  failure is counted) and per-attempt timeout.
+- `connection`: endpoint (or a list of endpoints, used round-robin),
+  credentials, region, SDK retries (default 0 so every failure is counted)
+  and per-attempt timeout.
 - `entities`: how many vector buckets and indexes to create, index parameters
   (dimension, metric, RGW filterable keys, non-filterable keys), vectors per
   index, insert batch size, key prefix, vector source and metadata fields.

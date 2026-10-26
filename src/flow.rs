@@ -79,6 +79,7 @@ pub async fn run_job(name: String, cfg: Config) -> Result<JobReport> {
     let plan = make_plan(&cfg, &mut rng);
     tracing::info!(
         job = %name,
+        endpoints = %cfg.connection.endpoint,
         seed,
         threads,
         repeat,
@@ -306,8 +307,13 @@ async fn run_step(
                     async move {
                         if ctx.cfg.entities.vector_buckets.create_backing_bucket {
                             // Not measured: a prerequisite of the RGW backend, not part of the API.
-                            if let Err(e) =
-                                ctx.clients.s3.create_bucket().bucket(&bucket).send().await
+                            if let Err(e) = ctx
+                                .clients
+                                .s3()
+                                .create_bucket()
+                                .bucket(&bucket)
+                                .send()
+                                .await
                             {
                                 let code = error_code(&e);
                                 if code != "BucketAlreadyOwnedByYou" {
@@ -321,7 +327,7 @@ async fn run_step(
                         let r = measured(
                             &m,
                             ctx.clients
-                                .vectors
+                                .vectors()
                                 .create_vector_bucket()
                                 .vector_bucket_name(&bucket)
                                 .customize()
@@ -374,7 +380,7 @@ async fn run_step(
                         let ic = &ctx.cfg.entities.index;
                         let req = ctx
                             .clients
-                            .vectors
+                            .vectors()
                             .create_index()
                             .vector_bucket_name(&bucket)
                             .index_name(&index)
@@ -445,7 +451,7 @@ async fn run_step(
                         let ok = measured(
                             &m,
                             ctx.clients
-                                .vectors
+                                .vectors()
                                 .put_vectors()
                                 .vector_bucket_name(&ip.bucket)
                                 .index_name(&ip.name)
@@ -487,7 +493,7 @@ async fn run_step(
                         let _ = measured(
                             &m,
                             ctx.clients
-                                .vectors
+                                .vectors()
                                 .get_vectors()
                                 .vector_bucket_name(&ip.bucket)
                                 .index_name(&ip.name)
@@ -520,7 +526,7 @@ async fn run_step(
                             let out = measured(
                                 &m,
                                 ctx.clients
-                                    .vectors
+                                    .vectors()
                                     .list_vectors()
                                     .vector_bucket_name(&ip.bucket)
                                     .index_name(&ip.name)
@@ -563,7 +569,7 @@ async fn run_step(
                         let ok = measured(
                             &m,
                             ctx.clients
-                                .vectors
+                                .vectors()
                                 .delete_vectors()
                                 .vector_bucket_name(&ip.bucket)
                                 .index_name(&ip.name)
@@ -614,7 +620,7 @@ async fn run_step(
                         let _ = measured(
                             &m,
                             ctx.clients
-                                .vectors
+                                .vectors()
                                 .put_vectors()
                                 .vector_bucket_name(&ip.bucket)
                                 .index_name(&ip.name)
@@ -675,7 +681,7 @@ async fn run_step(
                         };
                         let req = ctx
                             .clients
-                            .vectors
+                            .vectors()
                             .query_vectors()
                             .vector_bucket_name(&ip.bucket)
                             .index_name(&ip.name)
@@ -706,7 +712,7 @@ async fn run_step(
                         let ok = measured(
                             &m,
                             ctx.clients
-                                .vectors
+                                .vectors()
                                 .delete_index()
                                 .vector_bucket_name(&ip.bucket)
                                 .index_name(&ip.name)
@@ -740,7 +746,7 @@ async fn run_step(
                         let _ = measured(
                             &m,
                             ctx.clients
-                                .vectors
+                                .vectors()
                                 .delete_vector_bucket()
                                 .vector_bucket_name(&bucket)
                                 .customize()
@@ -750,8 +756,13 @@ async fn run_step(
                         .await;
                         if ctx.cfg.entities.vector_buckets.create_backing_bucket {
                             // Not measured; see CreateVectorBucket.
-                            if let Err(e) =
-                                ctx.clients.s3.delete_bucket().bucket(&bucket).send().await
+                            if let Err(e) = ctx
+                                .clients
+                                .s3()
+                                .delete_bucket()
+                                .bucket(&bucket)
+                                .send()
+                                .await
                             {
                                 m.record_err(
                                     format!("S3DeleteBucket:{}", error_code(&e)),
@@ -774,7 +785,7 @@ pub async fn cleanup(cfg: &Config) -> Result<()> {
     let prefix = &cfg.entities.vector_buckets.prefix;
     let mut buckets = Vec::new();
     let mut pages = clients
-        .vectors
+        .vectors()
         .list_vector_buckets()
         .prefix(prefix)
         .into_paginator()
@@ -803,7 +814,7 @@ pub async fn cleanup(cfg: &Config) -> Result<()> {
         }
         buckets.clear();
         let out = clients
-            .s3
+            .s3()
             .list_buckets()
             .send()
             .await
@@ -823,7 +834,7 @@ pub async fn cleanup(cfg: &Config) -> Result<()> {
     for bucket in &buckets {
         let mut indexes = Vec::new();
         let mut pages = clients
-            .vectors
+            .vectors()
             .list_indexes()
             .vector_bucket_name(bucket)
             .into_paginator()
@@ -835,7 +846,7 @@ pub async fn cleanup(cfg: &Config) -> Result<()> {
         for index in &indexes {
             tracing::info!("deleting index {bucket}/{index}");
             if let Err(e) = clients
-                .vectors
+                .vectors()
                 .delete_index()
                 .vector_bucket_name(bucket)
                 .index_name(index)
@@ -847,7 +858,7 @@ pub async fn cleanup(cfg: &Config) -> Result<()> {
         }
         tracing::info!("deleting vector bucket {bucket}");
         if let Err(e) = clients
-            .vectors
+            .vectors()
             .delete_vector_bucket()
             .vector_bucket_name(bucket)
             .send()
@@ -858,7 +869,7 @@ pub async fn cleanup(cfg: &Config) -> Result<()> {
     }
     if cfg.entities.vector_buckets.create_backing_bucket {
         let out = clients
-            .s3
+            .s3()
             .list_buckets()
             .send()
             .await
@@ -869,7 +880,7 @@ pub async fn cleanup(cfg: &Config) -> Result<()> {
                 continue;
             }
             tracing::info!("deleting backing bucket {name}");
-            if let Err(e) = clients.s3.delete_bucket().bucket(name).send().await {
+            if let Err(e) = clients.s3().delete_bucket().bucket(name).send().await {
                 tracing::warn!("delete bucket {name}: {}", error_detail(&e));
             }
         }

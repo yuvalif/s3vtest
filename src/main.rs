@@ -28,8 +28,9 @@ struct Cli {
 /// Connection settings that override the configuration file.
 #[derive(clap::Args, Clone, Debug)]
 struct ConnArgs {
-    /// S3 endpoint, overrides `connection.endpoint`.
-    #[arg(long, env = "AWS_ENDPOINT_URL")]
+    /// S3 endpoint, overrides `connection.endpoint`. A comma-separated
+    /// list spreads the requests over the endpoints in round-robin order.
+    #[arg(long, env = "AWS_ENDPOINT_URL", value_name = "URL[,URL...]")]
     endpoint: Option<String>,
     /// Access key, overrides `connection.access_key`.
     #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true)]
@@ -48,7 +49,9 @@ impl ConnArgs {
     fn overrides(&self) -> config::ConnectionOverrides {
         let non_empty = |v: &Option<String>| v.clone().filter(|s| !s.is_empty());
         config::ConnectionOverrides {
-            endpoint: non_empty(&self.endpoint),
+            endpoint: non_empty(&self.endpoint)
+                .map(|s| config::Endpoints::parse(&s))
+                .filter(|e| !e.is_empty()),
             access_key: non_empty(&self.access_key),
             secret_key: non_empty(&self.secret_key),
             region: non_empty(&self.region)

@@ -39,8 +39,10 @@ pub struct Config {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Connection {
+    /// One endpoint, or a list of endpoints that requests are sent to in
+    /// round-robin order. All share the credentials and region below.
     #[serde(default)]
-    pub endpoint: String,
+    pub endpoint: Endpoints,
     #[serde(default)]
     pub access_key: String,
     #[serde(default)]
@@ -62,7 +64,7 @@ pub struct Connection {
 impl Default for Connection {
     fn default() -> Self {
         Self {
-            endpoint: String::new(),
+            endpoint: Endpoints::default(),
             access_key: String::new(),
             secret_key: String::new(),
             region: default_region(),
@@ -77,10 +79,70 @@ impl Default for Connection {
 /// precedence over the file.
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionOverrides {
-    pub endpoint: Option<String>,
+    pub endpoint: Option<Endpoints>,
     pub access_key: Option<String>,
     pub secret_key: Option<String>,
     pub region: Option<String>,
+}
+
+/// The endpoint URLs of a connection. In YAML this is either a single string
+/// or a list of strings; a list of one is the same as a string.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(from = "EndpointsRepr", into = "EndpointsRepr")]
+pub struct Endpoints(pub Vec<String>);
+
+#[derive(Deserialize, Serialize)]
+#[serde(untagged)]
+enum EndpointsRepr {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl From<EndpointsRepr> for Endpoints {
+    fn from(r: EndpointsRepr) -> Self {
+        match r {
+            EndpointsRepr::One(s) => Endpoints::parse(&s),
+            EndpointsRepr::Many(v) => Endpoints(v.iter().map(|s| s.trim().to_string()).collect()),
+        }
+    }
+}
+
+impl From<Endpoints> for EndpointsRepr {
+    fn from(e: Endpoints) -> Self {
+        match e.0.len() {
+            1 => EndpointsRepr::One(e.0.into_iter().next().unwrap()),
+            _ => EndpointsRepr::Many(e.0),
+        }
+    }
+}
+
+impl Endpoints {
+    /// Split a comma-separated list, as given on the command line or in
+    /// AWS_ENDPOINT_URL; blanks around the commas are ignored and empty
+    /// items dropped.
+    pub fn parse(s: &str) -> Self {
+        Endpoints(
+            s.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
+        )
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &str> {
+        self.0.iter().map(String::as_str)
+    }
+}
+
+impl std::fmt::Display for Endpoints {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0.join(","))
+    }
 }
 
 fn default_region() -> String {
@@ -504,13 +566,13 @@ impl Config {
         let mut errors: Vec<String> = Vec::new();
         let e = &self.entities;
 
+        if self.connection.endpoint.is_empty() {
+            errors.push(
+                "connection.endpoint is not set; set it in the file, with --endpoint, or with AWS_ENDPOINT_URL"
+                    .into(),
+            );
+        }
         for (name, value, flag, var) in [
-            (
-                "endpoint",
-                &self.connection.endpoint,
-                "--endpoint",
-                "AWS_ENDPOINT_URL",
-            ),
             (
                 "access_key",
                 &self.connection.access_key,
@@ -530,11 +592,12 @@ impl Config {
                 ));
             }
         }
-        if !self.connection.endpoint.is_empty()
-            && !(self.connection.endpoint.starts_with("http://")
-                || self.connection.endpoint.starts_with("https://"))
-        {
-            errors.push("connection.endpoint must start with http:// or https://".into());
+        for ep in self.connection.endpoint.iter() {
+            if !(ep.starts_with("http://") || ep.starts_with("https://")) {
+                errors.push(format!(
+                    "connection.endpoint '{ep}' must start with http:// or https://"
+                ));
+            }
         }
 
         check_num(
@@ -855,6 +918,10 @@ pub const EXAMPLE_YAML: &str = r#"# s3vtest configuration
 # AWS_DEFAULT_REGION); those take precedence over this file.
 connection:
   endpoint: http://localhost:8000
+  # Or a list; requests are then spread over the endpoints in round-robin
+  # order, all with the same credentials. On the command line or in
+  # AWS_ENDPOINT_URL the list is comma-separated.
+  # endpoint: [http://rgw1:8000, http://rgw2:8000]
   access_key: 0555b35654ad1656d804
   secret_key: h7GhxuBLTrlhVUyxSPUKUV8r/2EI4ngqJxD7iBdBYLhwluN30JaT3Q==
   region: default
@@ -992,23 +1059,51 @@ mod tests {
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("AWS_ENDPOINT_URL") && err.contains("AWS_SECRET_ACCESS_KEY"));
         cfg.apply(&ConnectionOverrides {
-            endpoint: Some("http://host:9000".into()),
+            endpoint: Some(Endpoints::parse("http://host:9000")),
             access_key: Some("a".into()),
             secret_key: Some("b".into()),
             region: None,
         });
         cfg.validate().unwrap();
-        assert_eq!(cfg.connection.endpoint, "http://host:9000");
+        assert_eq!(cfg.connection.endpoint.to_string(), "http://host:9000");
         assert_eq!(cfg.connection.region, "us-east-1");
 
         // overrides win over the file
         let mut cfg: Config = serde_yaml_ng::from_str(EXAMPLE_YAML).unwrap();
         cfg.apply(&ConnectionOverrides {
-            endpoint: Some("https://other".into()),
+            endpoint: Some(Endpoints::parse("https://other")),
             ..Default::default()
         });
-        assert_eq!(cfg.connection.endpoint, "https://other");
+        assert_eq!(cfg.connection.endpoint.to_string(), "https://other");
         assert!(!cfg.connection.access_key.is_empty());
+    }
+
+    #[test]
+    fn endpoint_list() {
+        let one: Endpoints = serde_yaml_ng::from_str("http://a:1").unwrap();
+        assert_eq!(one.0, vec!["http://a:1"]);
+        let many: Endpoints = serde_yaml_ng::from_str("[http://a:1, http://b:2]").unwrap();
+        assert_eq!(many.0, vec!["http://a:1", "http://b:2"]);
+        assert_eq!(serde_yaml_ng::to_string(&one).unwrap().trim(), "http://a:1");
+        assert_eq!(
+            serde_yaml_ng::to_string(&many).unwrap().trim(),
+            "- http://a:1\n- http://b:2"
+        );
+        assert_eq!(
+            Endpoints::parse(" http://a:1 , http://b:2,,").0,
+            vec!["http://a:1", "http://b:2"]
+        );
+        assert!(Endpoints::parse(" , ").is_empty());
+
+        let mut cfg: Config = serde_yaml_ng::from_str(EXAMPLE_YAML).unwrap();
+        cfg.connection.endpoint = Endpoints::parse("http://a:1,ftp://b:2");
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("'ftp://b:2' must start with http"), "{err}");
+        cfg.connection.endpoint = Endpoints::parse("http://a:1,http://b:2");
+        cfg.validate().unwrap();
+        cfg.connection.endpoint = Endpoints::default();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("connection.endpoint is not set"), "{err}");
     }
 
     #[test]

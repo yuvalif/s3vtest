@@ -165,7 +165,7 @@ pub async fn recall(cfg: &Config, opts: &RecallOpts) -> Result<Vec<IndexRecall>>
         let mirror: Option<Arc<Mirror>> = if opts.no_list {
             None
         } else {
-            let m = list_index(&clients.vectors, ip, dim, opts.page_size).await?;
+            let m = list_index(clients.vectors(), ip, dim, opts.page_size).await?;
             tracing::info!(index = %format!("{}/{}", ip.bucket, ip.name), vectors = m.len(), "listed in {:.1}s", t.elapsed().as_secs_f64());
             if m.len() == 0 {
                 bail!(
@@ -195,7 +195,7 @@ pub async fn recall(cfg: &Config, opts: &RecallOpts) -> Result<Vec<IndexRecall>>
                 let top_k = opts.top_k as i32;
                 async move {
                     let r = clients
-                        .vectors
+                        .vectors()
                         .query_vectors()
                         .vector_bucket_name(&bucket)
                         .index_name(&index)
