@@ -114,6 +114,20 @@ pub async fn run_job(name: String, cfg: Config) -> Result<JobReport> {
         .collect();
 
     let mut state: Vec<IndexState> = vec![IndexState::default(); ctx.plan.indexes.len()];
+    if !ctx
+        .cfg
+        .flow
+        .iter()
+        .any(|s| matches!(s, Step::InsertVectors))
+    {
+        // Without an insert in this run, the key-based steps work on the vectors a
+        // previous run of the same job (same configuration and seed) inserted.
+        let n = seed_existing_keys(&mut state, &ctx.plan, &ctx.cfg.entities.key_prefix);
+        tracing::info!(
+            job = %name,
+            "no insert_vectors step: get/update/delete steps use the {n} keys a previous run of this job inserted"
+        );
+    }
     let mut aborted: Option<String> = None;
 
     'run: for rep in 0..repeat {
@@ -179,6 +193,22 @@ pub(crate) fn make_plan(cfg: &Config, rng: &mut SeededRng) -> Plan {
         buckets.push(bucket);
     }
     Plan { buckets, indexes }
+}
+
+/// Fill the key list of every index with the keys `insert_vectors` would have
+/// created for it: `key_prefix` followed by 0..num_vectors. Lets a flow without an
+/// insert step get, update or delete the vectors a previous run of the same job
+/// inserted. Returns the number of keys.
+fn seed_existing_keys(state: &mut [IndexState], plan: &Plan, key_prefix: &str) -> u64 {
+    let mut total = 0;
+    for (st, ip) in state.iter_mut().zip(&plan.indexes) {
+        st.keys = (0..ip.num_vectors)
+            .map(|k| format!("{key_prefix}{k}"))
+            .collect();
+        st.next_key = ip.num_vectors;
+        total += ip.num_vectors;
+    }
+    total
 }
 
 /// Run a set of futures with at most `threads` in flight; results in completion order.
@@ -890,4 +920,34 @@ pub async fn cleanup(cfg: &Config) -> Result<()> {
         buckets.len()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn existing_keys_match_insert_numbering() {
+        let plan = Plan {
+            buckets: vec!["b0".into()],
+            indexes: vec![
+                IndexPlan {
+                    bucket: "b0".into(),
+                    name: "idx-0".into(),
+                    num_vectors: 3,
+                },
+                IndexPlan {
+                    bucket: "b0".into(),
+                    name: "idx-1".into(),
+                    num_vectors: 0,
+                },
+            ],
+        };
+        let mut state = vec![IndexState::default(); 2];
+        assert_eq!(seed_existing_keys(&mut state, &plan, "vec-"), 3);
+        assert_eq!(state[0].keys, vec!["vec-0", "vec-1", "vec-2"]);
+        assert_eq!(state[0].next_key, 3);
+        assert!(state[1].keys.is_empty());
+        assert_eq!(state[1].next_key, 0);
+    }
 }

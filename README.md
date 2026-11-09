@@ -175,6 +175,13 @@ Ready-made jobs are in `examples/`:
   `create_index`, `insert_vectors`, `delete_index`, `delete_vector_bucket`.
   Parameterized steps: `get_vectors`, `list_vectors`, `delete_vectors`,
   `update_vectors`, `query_vectors`.
+  `get_vectors`, `update_vectors` and `delete_vectors` work on the keys that
+  `insert_vectors` created earlier in the run. When the flow has no
+  `insert_vectors` step they work on the keys a previous run of the same job
+  inserted instead (`key_prefix` followed by 0, 1, ...), so a job can be split
+  into several invocations: load the data, then benchmark `get_vectors` or
+  `query_vectors` against it later, as long as the configuration and seed are
+  the same.
 - `execution`: `threads` (in-flight requests), `repeat`, `seed`,
   `datasets_dir`, `max_logged_errors`.
 
