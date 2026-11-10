@@ -11,7 +11,38 @@ env:
   IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
+  # the image is only built when the source formats, builds, lints and tests
+  # cleanly, with the hdf5 feature the image is built with
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install libhdf5
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libhdf5-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo build --features hdf5
+        run: cargo build --locked --features hdf5
+
+      - name: cargo clippy --features hdf5
+        run: cargo clippy --locked --features hdf5 --all-targets -- -D warnings
+
+      - name: cargo test --features hdf5
+        run: cargo test --locked --features hdf5
+
   build:
+    needs: check
     runs-on: ubuntu-latest
     permissions:
       contents: read
